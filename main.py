@@ -231,8 +231,10 @@ async def search_youtube_video_free(query: str, language: str = "en") -> Optiona
                 # Validate video quality by checking if multiple videos were found
                 # (indicates relevant search results)
                 if len(unique_video_ids) >= 2:
-                    # Return the first valid video URL
-                    return f"https://www.youtube.com/watch?v={unique_video_ids[0]}"
+                    # Additional content validation: check if the search context matches expected content
+                    if _validate_video_content_relevance(query, response.text):
+                        # Return the first valid video URL
+                        return f"https://www.youtube.com/watch?v={unique_video_ids[0]}"
                 # If only one video found, be more cautious - might not be relevant
                 
     except Exception as e:
@@ -262,6 +264,60 @@ async def search_video_alternative_sources(query: str, language: str = "en") -> 
     # - Educational platform searches
     
     return None
+
+def _validate_video_content_relevance(search_query: str, search_results_html: str) -> bool:
+    """
+    Validate that video search results are actually relevant to the search query.
+    Helps prevent irrelevant content like kitchen videos for camping courses.
+    """
+    query_lower = search_query.lower()
+    results_lower = search_results_html.lower()
+    
+    # Define conflicting content patterns that should disqualify results
+    conflict_patterns = {
+        # If searching for camping/outdoor content, reject kitchen/cooking content
+        "camping": ["kitchen", "cooking", "recipe", "baking", "chef", "culinary", "food preparation"],
+        "tent": ["kitchen", "interior design", "home decoration", "cooking", "recipe"],
+        "outdoor": ["interior", "indoor", "kitchen", "home design", "cooking"],
+        "hiking": ["kitchen", "cooking", "recipe", "interior design"],
+        
+        # If searching for cooking content, reject automotive content
+        "cooking": ["automotive", "car repair", "mechanic", "engine"],
+        "baking": ["automotive", "car repair", "mechanic", "engine"],
+        "kitchen": ["automotive", "car repair", "mechanic", "camping equipment"],
+        
+        # If searching for automotive content, reject cooking content
+        "automotive": ["cooking", "baking", "recipe", "kitchen", "culinary"],
+        "car": ["cooking", "baking", "recipe", "kitchen design"],
+        "mechanic": ["cooking", "baking", "recipe", "kitchen"],
+        
+        # General conflicts
+        "art": ["automotive", "car repair", "kitchen appliance"],
+        "music": ["automotive", "cooking equipment", "car repair"]
+    }
+    
+    # Check if the search query contains any keywords that have known conflicts
+    for query_keyword, conflicting_terms in conflict_patterns.items():
+        if query_keyword in query_lower:
+            # Count how many conflicting terms appear in results
+            conflict_count = sum(1 for term in conflicting_terms if term in results_lower)
+            relevant_count = results_lower.count(query_keyword)
+            
+            # If we find more conflicting content than relevant content, reject
+            if conflict_count > relevant_count and conflict_count >= 3:
+                if os.getenv("DEBUG", "false").lower() == "true":
+                    print(f"Video search rejected: found {conflict_count} conflicting terms vs {relevant_count} relevant terms for '{query_keyword}'")
+                return False
+    
+    # Additional specific validation for common mismatches
+    if any(outdoor_term in query_lower for outdoor_term in ["camping", "tent", "outdoor", "hiking"]):
+        # For outdoor queries, reject if we see too many kitchen/cooking indicators
+        kitchen_indicators = ["recipe", "cooking", "kitchen design", "culinary", "chef", "food", "ingredient"]
+        kitchen_count = sum(1 for indicator in kitchen_indicators if indicator in results_lower)
+        if kitchen_count >= 5:  # Too many cooking-related results
+            return False
+    
+    return True
 
 def create_contextual_search_query(lesson_title: str, course_title: str, lesson_content: str = "") -> str:
     """
@@ -304,6 +360,35 @@ def create_contextual_search_query(lesson_title: str, course_title: str, lesson_
         technique_keywords = [kw for kw in art_techniques if kw in lesson_lower or kw in content_lower]
         if technique_keywords:
             return f"{technique_keywords[0]} art technique tutorial"
+    
+    # For camping/outdoor equipment courses
+    elif any(outdoor_term in course_lower for outdoor_term in ["camping", "tent", "outdoor", "hiking", "survival", "adventure", "equipment", "gear"]):
+        camping_techniques = [
+            "setup", "assembly", "pitching", "folding", "packing", "installation",
+            "maintenance", "repair", "care", "storage", "operation", "use"
+        ]
+        technique_keywords = [kw for kw in camping_techniques if kw in lesson_lower or kw in content_lower]
+        
+        # Look for specific equipment types
+        equipment_types = [
+            "tent", "sleeping bag", "backpack", "stove", "lantern", "compass",
+            "rope", "tarp", "shelter", "cookware", "water filter", "headlamp"
+        ]
+        equipment_keywords = [eq for eq in equipment_types if eq in lesson_lower or eq in content_lower]
+        
+        if technique_keywords and equipment_keywords:
+            return f"how to {technique_keywords[0]} {equipment_keywords[0]} camping tutorial"
+        elif equipment_keywords:
+            return f"{equipment_keywords[0]} camping gear review setup tutorial"
+        elif technique_keywords:
+            return f"camping {technique_keywords[0]} outdoor tutorial"
+        else:
+            # Focus on structure and classification for camping equipment
+            if any(classifier in lesson_lower for classifier in ["classifying", "classification", "structure", "type", "category"]):
+                equipment_focus = next((eq for eq in equipment_types if eq in course_lower), "equipment")
+                return f"camping {equipment_focus} types classification structure guide"
+            else:
+                return f"camping outdoor equipment tutorial"
     
     # Default: focus on the specific lesson technique + course context
     # Remove common filler words
@@ -418,6 +503,18 @@ def should_include_video(lesson_title: str, course_title: str, lesson_content: s
             "clinical skill", "patient care", "hands-on", "practice", "protocol"
         ]
         return any(keyword in combined_text for keyword in medical_video_keywords)
+    
+    # Camping/Outdoor Equipment courses
+    elif any(outdoor_term in course_lower for outdoor_term in ["camping", "tent", "outdoor", "hiking", "survival", "adventure", "equipment", "gear"]):
+        camping_video_keywords = [
+            "setup", "assembly", "installation", "pitching", "folding", "packing",
+            "demonstration", "technique", "procedure", "step by step", "hands-on",
+            "practical", "use", "operation", "maintenance", "care", "storage",
+            "safety", "proper use", "equipment handling", "gear setup",
+            "field test", "real world", "outdoor use", "weather protection",
+            "durability test", "weight", "portability", "space efficiency"
+        ]
+        return any(keyword in combined_text for keyword in camping_video_keywords)
     
     # Default: Be very conservative - only recommend if explicitly practical
     ultra_practical_keywords = [
