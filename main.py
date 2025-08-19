@@ -1507,6 +1507,8 @@ async def test_video_search(
     }
 
 if __name__ == "__main__":
-    # Allow `python main.py` for dev convenience
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
+    port = int(os.getenv("PORT", 8000))
+    # Disable reload in production (when PORT is set by platform)
+    reload = os.getenv("PORT") is None
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=reload)
