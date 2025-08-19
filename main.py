@@ -82,6 +82,25 @@ class PublishIn(BaseModel):
     draftId: str
     # createdBy removed; we will use JWT user id
 
+# Review models
+class ReviewSubmission(BaseModel):
+    rating: int = Field(..., ge=1, le=5)
+    title: Optional[str] = None
+    body: str = Field(..., min_length=10, max_length=2000)
+    is_anonymous: bool = False
+
+class ReviewUpdate(BaseModel):
+    rating: Optional[int] = Field(None, ge=1, le=5)
+    title: Optional[str] = None
+    body: Optional[str] = Field(None, min_length=10, max_length=2000)
+    is_anonymous: Optional[bool] = None
+
+class InstructorResponse(BaseModel):
+    response: str = Field(..., min_length=10, max_length=1000)
+
+class HelpfulVote(BaseModel):
+    is_helpful: bool
+
 
 # ---------------------------
 # Auth helpers (Supabase JWT via JWKS)
@@ -1259,6 +1278,196 @@ async def get_public_course_preview(course_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch course preview: {str(e)}")
+
+# ---------------------------
+# Reviews API Endpoints
+# ---------------------------
+
+@app.get("/courses/{course_id}/reviews")
+async def get_course_reviews(
+    course_id: str,
+    page: int = 1,
+    limit: int = 10,
+    sort: str = "newest"  # newest, oldest, highest, lowest, helpful
+):
+    """Get paginated reviews for a course"""
+    sb = supabase_client()
+    if not sb:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    
+    # Calculate offset
+    offset = (page - 1) * limit
+    
+    # Build query
+    query = sb.table("course_reviews").select(
+        "id, rating, title, body, is_anonymous, created_at, updated_at, is_edited, helpful_count, "
+        "profiles!course_reviews_user_id_fkey(id, first_name, last_name, avatar_url)"
+    ).eq("course_id", course_id)
+    
+    # Apply sorting
+    if sort == "oldest":
+        query = query.order("created_at", desc=False)
+    elif sort == "highest":
+        query = query.order("rating", desc=True)
+    elif sort == "lowest":
+        query = query.order("rating", desc=False)
+    elif sort == "helpful":
+        query = query.order("helpful_count", desc=True)
+    else:  # newest (default)
+        query = query.order("created_at", desc=True)
+    
+    # Apply pagination
+    query = query.range(offset, offset + limit - 1)
+    
+    try:
+        response = query.execute()
+        reviews = response.data or []
+        
+        # Get instructor responses for these reviews
+        if reviews:
+            review_ids = [review["id"] for review in reviews]
+            responses_query = sb.table("review_responses").select(
+                "review_id, response, created_at, "
+                "profiles!review_responses_instructor_id_fkey(first_name, last_name, avatar_url)"
+            ).in_("review_id", review_ids)
+            
+            responses_result = responses_query.execute()
+            responses_data = responses_result.data or []
+            
+            # Create a map of review_id to response
+            responses_map = {resp["review_id"]: resp for resp in responses_data}
+            
+            # Add responses to reviews
+            for review in reviews:
+                review["instructor_response"] = responses_map.get(review["id"])
+        
+        return {
+            "reviews": reviews,
+            "page": page,
+            "limit": limit,
+            "has_more": len(reviews) == limit
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch reviews: {str(e)}")
+
+@app.post("/courses/{course_id}/reviews")
+async def submit_review(
+    course_id: str,
+    review: ReviewSubmission,
+    user=Depends(get_current_user)
+):
+    """Submit a new review for a course"""
+    sb = supabase_client()
+    if not sb:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    
+    user_id = user.get("id")
+    
+    try:
+        # Check if user is enrolled in the course (you might need to implement this check)
+        # For now, we'll skip this check but you should add enrollment verification
+        
+        # Check if user already reviewed this course
+        existing_review = sb.table("course_reviews").select("id").eq("course_id", course_id).eq("user_id", user_id).execute()
+        if existing_review.data:
+            raise HTTPException(status_code=400, detail="You have already reviewed this course")
+        
+        # Check if user is the course instructor
+        course_check = sb.table("courses").select("user_id").eq("id", course_id).single().execute()
+        if course_check.data and course_check.data["user_id"] == user_id:
+            raise HTTPException(status_code=400, detail="You cannot review your own course")
+        
+        # Insert the review
+        review_data = {
+            "course_id": course_id,
+            "user_id": user_id,
+            "rating": review.rating,
+            "title": review.title,
+            "body": review.body,
+            "is_anonymous": review.is_anonymous
+        }
+        
+        result = sb.table("course_reviews").insert(review_data).execute()
+        
+        if result.data:
+            return {"message": "Review submitted successfully", "review_id": result.data[0]["id"]}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to submit review")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to submit review: {str(e)}")
+
+@app.put("/reviews/{review_id}")
+async def update_review(
+    review_id: str,
+    review_update: ReviewUpdate,
+    user=Depends(get_current_user)
+):
+    """Update an existing review"""
+    sb = supabase_client()
+    if not sb:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    
+    user_id = user.get("id")
+    
+    try:
+        # Check if review exists and belongs to user
+        existing_review = sb.table("course_reviews").select("*").eq("id", review_id).eq("user_id", user_id).single().execute()
+        if not existing_review.data:
+            raise HTTPException(status_code=404, detail="Review not found or you don't have permission to edit it")
+        
+        # Build update data
+        update_data = {"updated_at": datetime.now(timezone.utc).isoformat(), "is_edited": True}
+        
+        if review_update.rating is not None:
+            update_data["rating"] = review_update.rating
+        if review_update.title is not None:
+            update_data["title"] = review_update.title
+        if review_update.body is not None:
+            update_data["body"] = review_update.body
+        if review_update.is_anonymous is not None:
+            update_data["is_anonymous"] = review_update.is_anonymous
+        
+        # Update the review
+        result = sb.table("course_reviews").update(update_data).eq("id", review_id).execute()
+        
+        return {"message": "Review updated successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update review: {str(e)}")
+
+@app.delete("/reviews/{review_id}")
+async def delete_review(
+    review_id: str,
+    user=Depends(get_current_user)
+):
+    """Delete a review"""
+    sb = supabase_client()
+    if not sb:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    
+    user_id = user.get("id")
+    
+    try:
+        # Check if review exists and belongs to user
+        existing_review = sb.table("course_reviews").select("*").eq("id", review_id).eq("user_id", user_id).single().execute()
+        if not existing_review.data:
+            raise HTTPException(status_code=404, detail="Review not found or you don't have permission to delete it")
+        
+        # Delete the review (cascade will handle responses and helpfulness votes)
+        sb.table("course_reviews").delete().eq("id", review_id).execute()
+        
+        return {"message": "Review deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete review: {str(e)}")
 
 # Health
 @app.get("/")
