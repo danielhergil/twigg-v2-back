@@ -1506,9 +1506,4 @@ async def test_video_search(
         "search_enabled": VIDEO_SEARCH_ENABLED
     }
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    # Disable reload in production (when PORT is set by platform)
-    reload = os.getenv("PORT") is None
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=reload)
+# Removed __main__ block - Render will use uvicorn command directly from render.yaml
