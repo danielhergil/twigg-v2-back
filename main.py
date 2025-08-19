@@ -1008,6 +1008,258 @@ async def delete_course(
     return {"ok": True, "deletedCourseId": course_id}
 
 
+# ---------------------------
+# Public Course Cards (for unauthenticated users)
+# ---------------------------
+class PublicCourseCard(BaseModel):
+    id: str
+    title: str
+    thumbnail_url: Optional[str]
+    level: Optional[str]
+    duration_weeks: Optional[int]
+    rating_avg: float
+    reviews_count: int
+    created_at: str
+    instructor_name: str
+    instructor_avatar: Optional[str]
+    is_featured: bool
+
+@app.get("/courses/public/cards", response_model=List[PublicCourseCard])
+async def get_public_course_cards(
+    search: Optional[str] = None,
+    level: Optional[str] = None,
+    sort_by: str = "popular",  # popular, rating, newest
+    page: int = 1,
+    limit: int = 12
+):
+    """
+    Get course cards for public display (unauthenticated users).
+    Returns only basic information needed for course browsing.
+    """
+    sb = supabase_client()
+    if not sb:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    
+    # Calculate offset for pagination
+    offset = (page - 1) * limit
+    
+    # Build query for published courses only
+    query = sb.table("courses").select(
+        "id, title, thumbnail_url, level, duration_weeks, rating_avg, reviews_count, created_at, user_id"
+    ).eq("is_published", True)
+    
+    # Apply search filter if provided
+    if search and search.strip():
+        search_term = search.strip()
+        query = query.or_(f"title.ilike.%{search_term}%")
+    
+    # Apply level filter if provided
+    if level and level != "all":
+        query = query.eq("level", level)
+    
+    # Apply sorting
+    if sort_by == "rating":
+        query = query.order("rating_avg", desc=True)
+    elif sort_by == "newest":
+        query = query.order("created_at", desc=True)
+    else:  # popular (default)
+        query = query.order("reviews_count", desc=True)
+    
+    # Apply pagination
+    query = query.range(offset, offset + limit - 1)
+    
+    try:
+        response = query.execute()
+        courses_data = response.data or []
+        
+        # Get unique user IDs to fetch profiles
+        user_ids = list(set(course.get("user_id") for course in courses_data if course.get("user_id")))
+        
+        # Fetch profiles for all instructors
+        profiles_data = {}
+        if user_ids:
+            profiles_response = sb.table("profiles").select("id, first_name, last_name, avatar_url").in_("id", user_ids).execute()
+            profiles_list = profiles_response.data or []
+            profiles_data = {profile["id"]: profile for profile in profiles_list}
+        
+        # Transform data to match our model
+        public_cards = []
+        for course in courses_data:
+            # Get instructor name
+            instructor_name = "Unknown Instructor"
+            instructor_avatar = None
+            
+            user_id = course.get("user_id")
+            if user_id and user_id in profiles_data:
+                profile = profiles_data[user_id]
+                first_name = profile.get("first_name", "")
+                last_name = profile.get("last_name", "")
+                full_name = f"{first_name} {last_name}".strip()
+                if full_name:
+                    instructor_name = full_name
+                instructor_avatar = profile.get("avatar_url")
+            
+            # Determine if course is featured
+            rating_avg = course.get("rating_avg") or 0
+            reviews_count = course.get("reviews_count") or 0
+            is_featured = rating_avg >= 4.5 and reviews_count >= 10
+            
+            public_card = PublicCourseCard(
+                id=course["id"],
+                title=course["title"],
+                thumbnail_url=course.get("thumbnail_url"),
+                level=course.get("level"),
+                duration_weeks=course.get("duration_weeks"),
+                rating_avg=rating_avg,
+                reviews_count=reviews_count,
+                created_at=course["created_at"],
+                instructor_name=instructor_name,
+                instructor_avatar=instructor_avatar,
+                is_featured=is_featured
+            )
+            public_cards.append(public_card)
+        
+        return public_cards
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch courses: {str(e)}")
+
+@app.get("/courses/public/featured", response_model=List[PublicCourseCard])
+async def get_featured_course_cards(limit: int = 6):
+    """
+    Get featured course cards for public display.
+    Returns only courses with high ratings and review counts.
+    """
+    sb = supabase_client()
+    if not sb:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    
+    try:
+        # Get courses with high ratings and review counts
+        response = sb.table("courses").select(
+            "id, title, thumbnail_url, level, duration_weeks, rating_avg, reviews_count, created_at, user_id"
+        ).eq("is_published", True).order("rating_avg", desc=True).limit(limit).execute()
+        
+        courses_data = response.data or []
+        
+        # Get unique user IDs to fetch profiles
+        user_ids = list(set(course.get("user_id") for course in courses_data if course.get("user_id")))
+        
+        # Fetch profiles for all instructors
+        profiles_data = {}
+        if user_ids:
+            profiles_response = sb.table("profiles").select("id, first_name, last_name, avatar_url").in_("id", user_ids).execute()
+            profiles_list = profiles_response.data or []
+            profiles_data = {profile["id"]: profile for profile in profiles_list}
+        
+        # Transform data to match our model
+        featured_cards = []
+        for course in courses_data:
+            # Get instructor name
+            instructor_name = "Unknown Instructor"
+            instructor_avatar = None
+            
+            user_id = course.get("user_id")
+            if user_id and user_id in profiles_data:
+                profile = profiles_data[user_id]
+                first_name = profile.get("first_name", "")
+                last_name = profile.get("last_name", "")
+                full_name = f"{first_name} {last_name}".strip()
+                if full_name:
+                    instructor_name = full_name
+                instructor_avatar = profile.get("avatar_url")
+            
+            rating_avg = course.get("rating_avg") or 0
+            reviews_count = course.get("reviews_count") or 0
+            is_featured = rating_avg >= 4.5 and reviews_count >= 10
+            
+            featured_card = PublicCourseCard(
+                id=course["id"],
+                title=course["title"],
+                thumbnail_url=course.get("thumbnail_url"),
+                level=course.get("level"),
+                duration_weeks=course.get("duration_weeks"),
+                rating_avg=rating_avg,
+                reviews_count=reviews_count,
+                created_at=course["created_at"],
+                instructor_name=instructor_name,
+                instructor_avatar=instructor_avatar,
+                is_featured=is_featured
+            )
+            featured_cards.append(featured_card)
+        
+        return featured_cards
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch featured courses: {str(e)}")
+
+@app.get("/courses/public/{course_id}/preview")
+async def get_public_course_preview(course_id: str):
+    """
+    Get limited course preview for unauthenticated users.
+    Returns basic course information without sensitive content.
+    """
+    sb = supabase_client()
+    if not sb:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    
+    try:
+        # Get basic course information
+        response = sb.table("courses").select(
+            "id, title, thumbnail_url, level, duration_weeks, rating_avg, reviews_count, created_at, language, user_id"
+        ).eq("id", course_id).eq("is_published", True).single().execute()
+        
+        course_data = response.data
+        if not course_data:
+            raise HTTPException(status_code=404, detail="Course not found")
+        
+        # Get instructor name
+        instructor_name = "Unknown Instructor"
+        instructor_avatar = None
+        
+        user_id = course_data.get("user_id")
+        if user_id:
+            profile_response = sb.table("profiles").select("first_name, last_name, avatar_url").eq("id", user_id).single().execute()
+            if profile_response.data:
+                profile = profile_response.data
+                first_name = profile.get("first_name", "")
+                last_name = profile.get("last_name", "")
+                full_name = f"{first_name} {last_name}".strip()
+                if full_name:
+                    instructor_name = full_name
+                instructor_avatar = profile.get("avatar_url")
+        
+        # Determine if course is featured
+        rating_avg = course_data.get("rating_avg") or 0
+        reviews_count = course_data.get("reviews_count") or 0
+        is_featured = rating_avg >= 4.5 and reviews_count >= 10
+        
+        preview_data = {
+            "id": course_data["id"],
+            "title": course_data["title"],
+            "description": "Sign up to see the full course description and curriculum details.",
+            "thumbnail_url": course_data.get("thumbnail_url"),
+            "level": course_data.get("level"),
+            "duration_weeks": course_data.get("duration_weeks"),
+            "rating_avg": rating_avg,
+            "reviews_count": reviews_count,
+            "created_at": course_data["created_at"],
+            "language": course_data.get("language", "English"),
+            "is_featured": is_featured,
+            "instructor": {
+                "name": instructor_name,
+                "avatar_url": instructor_avatar
+            },
+            "modules": []  # Empty for unauthenticated users
+        }
+        
+        return preview_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch course preview: {str(e)}")
+
 # Health
 @app.get("/")
 async def health():
